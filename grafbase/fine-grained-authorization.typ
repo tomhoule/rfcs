@@ -1,9 +1,15 @@
 #set text(font: "Inter")
+
 #set page(footer: [
   #set align(right)
   #set text(size: 8pt)
   Grafbase — Tom Houlé — #datetime.today().display("[year]-[month]-[day]")
 ])
+
+#show link: body => {
+  set text(blue)
+  underline(body)
+}
 
 #text(size: 30pt, weight: "semibold")[RFC]
 
@@ -75,11 +81,13 @@ Enterprises have centralized authorization services — we will dive into that i
 
 Modern enterprise authorization implementations use elements of all these models, where roles are still a relevant concept, layered in with attribute-based access control and fine-grained permissions for each instance of a resource. Even ostensibly ReBAC focused systems like SpiceDB and OpenFGA bake in a context of attributes (ABAC) when evaluating access decisions. These models complement each other. They can coexist in the same system.
 
+Another term that has become common is *Policy-based access control (PBAC)*. In PBAC, a policy decision point evaluates policies to manage what an individual or system can do. These policies are essentially a set of rules and conditions that are centrally managed and can be as simple or as complex as needed. Instead of permissions being hard-coded into applications, PBAC externalizes these decisions, allowing for greater flexibility and easier management of access rights. That most often goes hand in hand with policy as code (see below). While RBAC, ABAC, and ReBAC represent different methodologies for determining access, PBAC can be seen as an overarching approach that often incorporates elements of these other models to enforce its policies.
+
 == Modern enterprise authorization
 
 === Policy as code
 
-Authorization as Code (AaC) is the practice of managing and defining access control policies using code, rather than through manual configurations in a database or an admin UI. These policy files are treated just like application code: they are stored in version control (like Git), tested automatically, and deployed through a CI/CD pipeline.
+Authorization as Code (AaC) is the practice of managing and defining access control policies using code, rather than through manual configurations in a database or an admin UI. These policy files are treated just like application code: they are stored in version control (like Git), tested automatically, and deployed through a CI/CD pipeline. It is a subset of Policy as Code.
 
 The auditability, traceability and composability benefits known from the usage of code and VCSs as sources of truth apply here in the same way as in other models like Infrastructure as Code (IaC).
 
@@ -104,3 +112,7 @@ Examples:
 The general idea is authzen-based pluggable access control, with a default baked-in but customizable implementation.
 
 As a principle, we should push as much of the ownership and... to the users' IdP.
+
+== Built-in PDP with Cedar
+
+== Externalizing authorization with Authzen
