@@ -1,8 +1,16 @@
 #set text(font: "Inter")
 
-#set page(footer: [
+#set page(numbering: "— 1 —")
+
+#set page(footer: context [
   #set align(right)
   #set text(size: 8pt)
+
+  #counter(page).display(
+    "1/1",
+    both: true,
+  )
+  #h(1fr)
   Grafbase — Tom Houlé — #datetime.today().display("[year]-[month]-[day]")
 ])
 
@@ -105,6 +113,19 @@ Examples:
 
 === Emerging standard: Authzen
 
+#link("https://openid.net/wg/authzen/")[Authzen] is a new standardization effort started in 2023 and hosted by the OpenID foundation. Authzen wants to be to authentication what OpenID Connect is to user authentication.
+
+The different actors in the Authzen model and their roles is described by the *P\*P model*.
+
+- *Policy Enforcement Point (PEP)*. The protected resource server. In our case, the Grafbase API. This role is often played by API Gateways. That issue is orthogonal, but we are exploring this for Grafbase Gateway.
+- *Policy Decision Point (PDP)*. The authorization service.
+- *Policy Information Point (PIP)*.
+- *Policy Administration Point (PAP)*.
+
+https://openid.net/how-authzen-and-shared-signals-caep-complement-each-other/
+
+https://medium.com/identity-beyond-borders/the-four-horsemen-of-authorization-the-p-ps-pep-pdp-pap-and-pip-42717e445ce7
+
 ...particularly for access tokens.
 
 = Proposed solution
@@ -116,3 +137,7 @@ As a principle, we should push as much of the ownership and... to the users' IdP
 == Built-in PDP with Cedar
 
 == Externalizing authorization with Authzen
+
+== Access tokens scoping with OAuth 2.0 Rich Authorization Requests
+
+https://oauth.net/2/rich-authorization-requests/
