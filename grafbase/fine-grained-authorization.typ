@@ -1,7 +1,5 @@
 #set text(font: "Inter")
 
-#set page(numbering: "— 1 —")
-
 #set page(footer: context [
   #set align(right)
   #set text(size: 8pt)
@@ -11,28 +9,42 @@
     both: true,
   )
   #h(1fr)
-  Grafbase — Tom Houlé — #datetime.today().display("[year]-[month]-[day]")
+  Tom Houlé (Grafbase) — #datetime.today().display("[year]-[month]-[day]")
 ])
+
+// Links
+#let cedar-policy = link("https://www.cedarpolicy.com")[Cedar Policy]
+#let authzen = link("https://openid.net/wg/authzen/")[Authzen]
 
 #show link: body => {
   set text(blue)
   underline(body)
 }
 
-#text(size: 30pt, weight: "semibold")[RFC]
+#text(size: 38pt, weight: "semibold")[RFC]
 
-#text(size: 24pt)[Fine-Grained Authorization in the Grafbase Enterprise Platform]
+#text(size: 28pt)[Fine-Grained Authorization in the Grafbase Enterprise Platform]
 
-#v(2em)
+
+
+#align(horizon)[
+
+#outline(depth: 2)
+#v(8em)
+]
+
+#pagebreak()
 
 = Introduction
 
-There is a need for finer grained authorization in the Grafbase Enterprise Platform. This RFC is an attempt at a principled, future-proof solution that will give us configurable, robust and performant access control that is maximally convenient for our users and does not require any additional infrastructure or setup as part of the Enterprise Platform.
+There is demand for finer grained authorization in the Grafbase Enterprise Platform. This RFC is an attempt at a principled, future-proof solution that will give us configurable, robust and performant access control that is maximally convenient for our users and does not require any additional infrastructure or setup as part of the Enterprise Platform.
 
 The scope of this RFC is authorization in the Enterprise Platform:
 
 - for human users logging in with the Dashboard or CLI,
-- for service accounts / access tokens interacting with the Grafbase API, object storage and the telemetry sink, in the Gateway, CI jobs, and external integrations.
+- for non-human agents interacting with the Grafbase API, object storage and the telemetry sink. For example CI jobs, Grafbase Gateway, external integrations or AI agents.
+
+This RFC will often reference OpenID Connect (OIDC) and OAuth 2.1 concepts, basic familiarity with them is assumed. Our current authentication solution is based on OIDC.
 
 = Requirements
 
@@ -48,7 +60,7 @@ Access control should not introduce excessive latency or network roundtrips.
 
 As much as possible, the authorization model should be familiar to enterprises looking to adopt Grafbase. It should be documentable, and the path to customization should be clear and accessible.
 
-== Powerful primitives
+== Expressive policies
 
 We want to enable fine-grained authorization decisions based on ownership of resources, team memberships, roles and other attributes. If the design does not accommodate this requirement, we will need to tack on more configurability to the solution later as a workaround — we should have enterprise use cases in mind from day one.
 
@@ -113,14 +125,16 @@ Examples:
 
 === Emerging standard: Authzen
 
-#link("https://openid.net/wg/authzen/")[Authzen] is a new standardization effort started in 2023 and hosted by the OpenID foundation. Authzen wants to be to authentication what OpenID Connect is to user authentication.
+#authzen is a standardization effort started in 2023 and hosted by the OpenID foundation. Authzen wants to be to authentication what OpenID Connect is to user authentication.
 
-The different actors in the Authzen model and their roles is described by the *P\*P model*.
+The actors and their roles are described by the *P\*P model*:
 
-- *Policy Enforcement Point (PEP)*. The protected resource server. In our case, the Grafbase API. This role is often played by API Gateways. That issue is orthogonal, but we are exploring this for Grafbase Gateway.
-- *Policy Decision Point (PDP)*. The authorization service.
-- *Policy Information Point (PIP)*.
-- *Policy Administration Point (PAP)*.
+- *Policy Enforcement Point (PEP)*. The protected resource server. That is to say, the service that sits in the critical path of application requests. In our case, the Grafbase API. This role is often played by API Gateways. That issue is orthogonal, but we are exploring fleshing out support for acting as an Authzen PEP in Grafbase Gateway.
+- *Policy Decision Point (PDP)*. The authorization service. When a PEP receives a request, it sends a query to the PDP. The PDP then makes the access decision by evaluating the request against the policies it receives from the PAP and the data it gathers from the PIP. The PDP can also act as both PAP and PIP, depending on the implementation.
+- *Policy Information Point (PIP)*. The PIP provides the PDP with the necessary context and attributes to make a decision. This can include information about the user (like their session validity), the resource, the environment, and other business-related attributes, in addition to the context provided by the PEP.
+- *Policy Administration Point (PAP)*. The PAP is responsible for creating, managing, and updating the access control policies that the PDP will use. This allows for centralized control over authorization rules.
+
+In this RFC, we will focus on the PEP and PDP. The PEP will be the Grafbase API. The PDP will be either embedded in the Grafbase API, or an external service, depending on the configuration of a specific Enterprise Platform deployment.
 
 https://openid.net/how-authzen-and-shared-signals-caep-complement-each-other/
 
@@ -134,10 +148,35 @@ The general idea is authzen-based pluggable access control, with a default baked
 
 As a principle, we should push as much of the ownership and... to the users' IdP.
 
-== Built-in PDP with Cedar
+But there is a tension. On the one hand, users of the hosted offering, or those with a more basic IdP and authorization setup, will want built-in roles and permission management, with the state managed inside the Grafbase platform. On the other hand, enterprises will want to rely on their existing IdP for fine grained scopes and Rich Authorization Requests (RAR), and on their enterprise policy decision points (PDP) for access control.
 
-== Externalizing authorization with Authzen
+To reconcile these differing needs, the rest of the RFC will expose a solution that can be summarized as:
 
-== Access tokens scoping with OAuth 2.0 Rich Authorization Requests
+- on the *entitlements* side, _both_ built-in roles, teams and ownership data, and custom scopes / RARs from the IdP
+- on the *access control* side, _either_ a built-in #cedar-policy based decision point (PDP) or pluggable
+
+The core idea to enable both convenient built-in authorization as a reasonable default and delegating as much to external services for those that need it is the decoupling of the policy decision part of the architecture: the PDP can decide to take into account or ignore as much of the built-in attributes (for example, what team owns which subgraph in the Grafbase API database) as it wants.
+
+The two extremes are on one end, the default built-in setup, and on the other end, a Grafbase Enterprise Platform deployment with no teams and no ownership data in Postgres, with all the entitlements and access control managed between the users' IdP and their PDP.
+
+The interface between the application layer and the authorization layer in the Enterprise Platform will be Authzen, which will enable swapping out the built-in PDP with an external one through simple configuration.
+
+== The interface: Authzen, schema, entities
+
+== Built-ins
+
+=== Built-in entitlements
+
+=== Built-in PDP with Cedar
+
+== Access tokens
+
+=== The Grafbase API as Authorization Server
+
+=== Scoping with OAuth 2.0 Rich Authorization Requests
 
 https://oauth.net/2/rich-authorization-requests/
+
+== Also see
+
+https://spiffe.io/docs/latest/spiffe-about/overview/
