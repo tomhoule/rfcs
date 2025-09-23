@@ -86,7 +86,7 @@ Self-hosting is top of mind, but the new solution should also work for the multi
 
 == Integration
 
-Enterprises have centralized authentication, internal user management and authorization services — we will dive into that in more detail in this document. We should support delegating as much as possible to these services.
+Enterprises have centralized authentication, internal user management and authorization services — we will dive into that in more detail in this document. We should support delegating to these services.
 
 #pagebreak()
 
@@ -165,6 +165,16 @@ It defines one endpoint on the PDP that returns access control decisions based o
 
 In this RFC, we will also focus on just the PEP and PDP. The PEP will be the Grafbase API. The PDP will be either embedded in the Grafbase API, or an external service, depending on the configuration of a specific Enterprise Platform deployment.
 
+While the PDP-PEP separation is seeing increasing adoption in enterprise environments, it is uncommon for access control for entire third-party applications to be delegated to an internal PDP, because of the large amount of special policies to write, and the need to reflect an internal data model that, by definition, is developed by third-parties.
+
+=== Workload identity
+
+Workload identity is the concept of giving a unique, verifiable identity to an automated process, like a CI/CD pipeline or a microservice, allowing it to authenticate and access resources securely without relying on long-lived, static secrets like API keys. This approach significantly enhances security by moving away from secrets that can be leaked or compromised. Instead of storing a secret, the workflow can prove its identity to another system, such as a cloud provider, or a service like the Grafbase API, and receive a short-lived access token in return. This is often accomplished using #openid-connect. In this M2M (machine-to-machine) context, the CI/CD platform acts as an OIDC provider, issuing an identity token that describes the workflow's context (e.g., repository, branch, commit SHA). The resource provider can then be configured to trust this OIDC provider and exchange that identity token for a temporary cloud access token. This is precisely how platforms like GitHub Actions and CircleCI enable passwordless authentication to services like AWS, Azure, and Google Cloud, making pipelines more secure and manageable.
+
+These concepts are being generalized in frameworks like #link("https://spiffe.io/docs/latest/spiffe-about/overview/")[SPIFFE (Security and Privacy Identity Framework for Everyone)].
+
+See #link("https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation")[this good Microsoft docs page] on an example of how to use workload identity with Azure.
+
 #pagebreak()
 
 = Proposed solution
@@ -178,8 +188,8 @@ We should accomodate all users between these two extremes.
 
 Furthermore, as hinted above, individual organizations' use cases will differ in two other ways:
 
-1. Organizations will want enforcement of access control to be baked in the Grafbase Enterprise Platform, others will want to rely on their central policy decision point (PDP). This is an either / or situation.
-2. Organizations will want to lean more or less on their IdP for membership and ownership relations. Some will want to base authorization decisions on fine-grained permissions embedded in ID tokens by their IdP, such as custom scopes and #rar. Others will want to configure individual users and teams' permissions in the Grafbase Dashboard. This is a spectrum, with one extreme not making use of the data in the Grafbase Database for authorization purposes, and the other, more common extreme having no relevant data except user identity in their users' JWTs.
+1. Organizations will want enforcement of access control to be baked in the Grafbase Enterprise Platform, others will want to rely on their central policy decision point (PDP).
+2. Organizations will want to lean more or less on their IdP for membership and ownership relations. Some will want to base authorization decisions on fine-grained permissions embedded in ID tokens by their IdP, with custom scopes and #rar. Others will want to configure individual users and teams' permissions in the Grafbase Dashboard. This is a spectrum, with one extreme not making use of the data in the Grafbase Database for authorization purposes, and the other, more common extreme having no relevant data except user identity in their users' JWTs.
   - This point is only about human users. For machine-to-machine use cases, we will have a single way to embed fine-grained entitlements in the access tokens (see below).
 
 For (1.), the solution is an interface used by the Grafbase Enterprise Platform to request authorization decisions, so the PDP is pluggable, with a default implementation baked into the `api` image of the Enterprise Platform. This RFC proposes using the #link("https://openid.net/specs/authorization-api-1_0-01.html#name-access-evaluation-api")[AuthZEN Access Evaluation API] as that interface.
@@ -189,7 +199,7 @@ To address (2.), the application will send *both* the relevant claims from the J
 To reconcile these differing needs, the rest of the RFC will expose a solution that can be summarized as:
 
 - on the *entitlements/context/claims* side, _both_ built-in roles, teams and ownership data, and custom scopes / RARs from the IdP
-- on the *access control* side, _either_ a built-in #cedar-policy based decision point (PDP) or an arbitrary PDP, with communication taking place as AuthZEN HTTP requests. Swapping one for the other will be a matter of configuration.
+- on the *access control* side, a built-in #cedar-policy based decision point (PDP) with the ability to replace with or augment with an arbitrary PDP, with communication to that arbitrary PDP taking place as AuthZEN HTTP requests. What authorizer implementation is used will be a matter of configuration.
 
 We will touch first on the interface between the application layer and the PDP, then on the built-in PDP using #cedar-policy, and finally, on a new access tokens implementation with fine-grained permissions baked in.
 
@@ -232,18 +242,24 @@ struct Request {
     context: Option<serde_json::Map>,
 }
 
+struct Decision {
+    decision: bool,
+    reason: Option<String>,
+}
+
 pub(crate) trait Authorizer {
-    async fn authorize(&self, request: &Request) -> Result<bool, Error>;
-    async fn batch_authorize(&self, requests: &[Request]) -> Result<Vec<bool>, Error>;
+    async fn authorize(&self, request: &Request) -> Result<Decision, Error>;
+    async fn batch_authorize(&self, requests: &[Request]) -> Result<Vec<Decision>, Error>;
 }
 ```
 
-We will want more precise types for the request payload, to keep track of what data we actually send and keep it consistent.
+We will want more precise types in `Request`, to keep track of what data we actually send and keep it consistent.
 
 We will have two implementers of these traits:
 
 - `HttpAuthzenAuthorizer`, which forwards the requests to an AuthZEN compliant server over HTTP, and returns the decision(s).
 - `CedarAuthorizer`, which is described below.
+- `HttpAuthzenAndCedarAuthorizer`, which will combine the decisions from both `HttpAuthzenAuthorizer` and `CedarAuthorizer`.
 
 Which implementer is used is based on configuration, either in a structured way if we introduce a configuration file, or through environment variables, for example `GRAFBASE_AUTHZEN_HTTP_PDP_URL`.
 
@@ -255,7 +271,7 @@ The trait above defines the shape in which authorization requests and the decisi
 - The actions and their properties.
 - The shape of the context.
 
-Except for the shape of the context, the #link("https://docs.cedarpolicy.com/schema/human-readable-schema.html")[Cedar schema format] is a very readable language for describing this kind of schemas. It has a JSON mapping which would let us generate docs directly from the schema, keeping a single source of truth for our authorization logic's data types and actions. We will elaborate more on Cedar below.
+Except for the shape of the context, the #link("https://docs.cedarpolicy.com/schema/human-readable-schema.html")[Cedar schema format] is a very readable language for describing this kind of schemas. It has a JSON mapping which would let us generate code, docs and forms in the dashboard directly from the schema, keeping a single source of truth for our authorization logic's data types and actions. We will elaborate more on Cedar below.
 
 You can find a work-in-progress schema for the Grafbase Enterprise Platform authorization logic at #grafbase-cedar-policies on GitHub.
 
@@ -287,16 +303,31 @@ Different actions on each of these resources are modeled as different actions in
 
 === Roles
 
-In the Grafbase API database schema, organizations have members, which can have one of three roles: "owner", "admin" or "member". The only difference between an admin and an owner is that the owner can delete the organization. For maximum flexibility, this RFC proposes:
+In the Grafbase API database schema, organizations have members, which currently can have one of three roles: "owner", "admin" or "member". The only difference between an admin and an owner is that the owner can delete the organization. For maximum flexibility, this RFC proposes:
 
-- Removing the "owner" role. By default, there are only admins and regular members. Admins have permissions to modify the organization itself and manage teams, while members can work within the organization, create graphs, etc. These roles, combined with ownership of graphs, branches and subgraphs by teams, offers a good balance of flexibility and restrictions on individual members.
+- Removing the "owner" and "member" roles. By default, there are only admins and regular members. Admins have permissions to modify the organization itself and manage teams, while members can work within the organization, create graphs, etc. These roles, combined with ownership of graphs, branches and subgraphs by teams, offers a good balance of flexibility and restrictions on individual members.
 - Allowing admins to define organization-specific roles and assign them to users or teams. These roles will be passed as part of the principal's properties in authorization requests, so they can be taken into account in access control decisions.
+
+A role is a collection of permissions. Permissions are coarse-grained action-resource pairs. An example role, represented as JSON, may look like this:
+
+```json
+{
+  "name": "SubgraphPublisher",
+  "permissions": [
+    "can_publish:subgraph",
+    "can_create:subgraph",
+    "can_edit_schema_check_settings:branch"
+  ],
+}
+```
+
+The purpose of roles is to provide a first level of coarse grained access control. Fine grained access control comes when roles are combined with ownership over resources.
 
 === Built-in PDP with Cedar
 
-For easy integration in customers' infrastructure, we need a good out-of-the-box solution for authorization. That solution has to play well with the subject-action-resource-context model, and it has to be embeddable in the Grafbase API deployment.
+For easy integration adoption, we need a good out-of-the-box solution for authorization. That solution has to play well with the subject-action-resource-context model, and it has to be embeddable in the Grafbase API deployment.
 
-Zanzibar-like (ReBAC) solutions like SpiceDB and OpenFGA are great, but they are not a fit here because they require much deeper integration in the application (syncing relations).
+Zanzibar-like (ReBAC) solutions like SpiceDB and OpenFGA are great, but they are not a fit here because they require much deeper integration in the application (syncing relations to a database).
 
 PDPs that are deployable as sidecars would be viable: #cerbos and #opa are the notable options here.
 
@@ -347,24 +378,32 @@ action "viewPhoto" appliesTo {
 };
 ```
 
+Policies can be statically validated against a schema using the Cedar CLI, or the crate. They lend themselves to static analysis, and to being stored in a database. Fundamental properties of the Cedar policy language #link("https://github.com/cedar-policy/cedar-spec")[have been verified in Lean]. Also see this #link("https://docs.cedarpolicy.com/other/security.html")[summary on the Cedar security model].
+
 In a first step, we would author and embed a Cedar schema and policies in the API, and start enforcing access to resources in the GraphQL API based using the Cedar engine behind the trait described in @trait.
 
-Since the policy language is easy to read and write, and our target audience is technically savvy, we could allow organizations to define their own policies against our schema, and take them into account in the managed offering. In the Enterprise Platform, we could take the policies as a file path. The default policies will be available on GitHub, and customizing them would start with forking that repository.
+Since the policy language is easy to read and write, and our target audience is technically savvy, we could in the future allow organizations to define their own policies against our schema, and take them into account in the managed offering. In the Enterprise Platform, we could take the policies as a file path. The default policies will be available on GitHub, and customizing them would start with forking that repository.
 
-Another great property of Cedar policies is that they have a well defined data representation (as JSON): we could build UI elements to customize parts of the policies, or all of them, and store the results in Postgres. The whole static validation logic for policies is in the open source #cedar-policy-crate, so these policies can be statically validated for type-correctness and applicability.
+Because the policies have a one to one mapping to JSON, we could build UI elements to customize parts of the policies, or all of them, and store the results in Postgres. The whole static validation logic for policies is in the open source #cedar-policy-crate, so these policies can be statically validated for type-correctness and applicability.
 
 Since policy evaluation is a pure function, these policies are easy to test. We should aim to provide a good test suite with our base policies repository.
 
 Audit logs are also an important feature. We should allow for them in the design, but the details are left to a separate RFC.
 
-== Access tokens
+== Machine to machine
 
-=== The Grafbase API as Authorization Server
+For machine-to-machine communication, the existing implementation has access tokens. They are JWTs. They are long lived by default, can have an expiration time, and can be revoked. Access tokens are minted by the Grafbase API and enforced by the Grafbase API, as well as the Telemetry Sink and Object Storage services.
 
-=== Scoping with OAuth 2.0 Rich Authorization Requests
+=== Access token security
 
-https://oauth.net/2/rich-authorization-requests/
+We will keep long lived access tokens for third-party integrations and the Gateway. The Gateway needs long lived access tokens for reliability, so it does not depend on a token refresh endpoint on the API or another authorization server. We will keep the existing system, with only graph scopes, for Gateway access tokens, with scopes baked into the JWT.
 
-== Also see
+We will also introduce access tokens with fine-grained permissions stored in Postgres, for access tokens that only need to communicate with the API. The fine-grained permissions will be built in the UI in the form of a (resource type, action) pair, with a wildcard ("\*") or specific IDs for the resource. As you can see in #grafbase-cedar-policies, the AccessToken entity has different properties from User, intentionally, to closely map to this way to assign fine-grained permissions.
 
-https://spiffe.io/docs/latest/spiffe-about/overview/
+Instead of the current symmetric encryption algorithm (HMAC), we will switch to asymmetric encryption. The algorithm will be Ed25519 (EdDSA), since it is fast and supported by AWS KMS.
+
+=== Workflow identity
+
+We will implement support for OIDC based workflow identity, with fine grained permissions, which will be defined with the same UI as fine grained permissions on access tokens.
+
+Each organization will be able to configure which OIDC providers they trust, and map claims to fine-grained permissions. A full description of the feature is best left to a separate RFC.
