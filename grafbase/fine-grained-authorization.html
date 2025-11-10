@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+  </head>
+  <body>
+    <p>RFC</p>
+    <p>Fine-Grained Authorization in the Grafbase Enterprise Platform</p>
+    <h2>Contents</h2>
+    <div>1.Introduction <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.Requirements <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.1.Infrastructure simplicity <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.2.Performance <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.3.Familiarity and convenience <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.4.Expressive policies <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.5.Customizability <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.6.Suitability to both the hosted and self hosted Enterprise Platform <span style="display: inline-block;"></span> ⁠1</div>
+    <div>2.7.Integration <span style="display: inline-block;"></span> ⁠1</div>
+    <div>3.Landscape <span style="display: inline-block;"></span> ⁠1</div>
+    <div>3.1.Terminology <span style="display: inline-block;"></span> ⁠1</div>
+    <div>3.2.Models of authorization <span style="display: inline-block;"></span> ⁠1</div>
+    <div>3.3.Modern enterprise authorization <span style="display: inline-block;"></span> ⁠1</div>
+    <div>4.Proposed solution <span style="display: inline-block;"></span> ⁠1</div>
+    <div>4.1.The interface <span style="display: inline-block;"></span> ⁠1</div>
+    <div>4.2.Built-ins <span style="display: inline-block;"></span> ⁠1</div>
+    <div>4.3.Machine to machine <span style="display: inline-block;"></span> ⁠1</div>
+    <h2>1. Introduction</h2>
+    <p>There is demand for finer grained authorization in the Grafbase Enterprise Platform. This RFC is an attempt at a principled, future-proof solution that will give us configurable, robust and performant access control that is maximally convenient for our users and does not require any additional infrastructure or setup as part of the Enterprise Platform.</p>
+    <p>The scope of this RFC is authorization in the Enterprise Platform:</p>
+    <ul>
+      <li>for human users logging in with the Dashboard or CLI,</li>
+      <li>for non-human agents interacting with the Grafbase API, object storage and the telemetry sink. For example CI jobs, Grafbase Gateway, external integrations or AI agents.</li>
+    </ul>
+    <p>This RFC will often reference <a href="https://openid.net/developers/how-connect-works/">OpenID Connect (OIDC)</a> and <a href="https://oauth.net/2/">OAuth 2.0</a> concepts, basic familiarity with them is assumed. Our current authentication solution is based on OIDC.</p>
+    <h2>2. Requirements</h2>
+    <h3>2.1. Infrastructure simplicity</h3>
+    <p>We want to avoid introducing additional infrastructure or setup as part of the Enterprise Platform. Fewer, simpler services mean a faster path to adoption, easier security reviews and generally a platform that is easier to operate.</p>
+    <h3>2.2. Performance</h3>
+    <p>Access control should not introduce excessive latency or network roundtrips.</p>
+    <h3>2.3. Familiarity and convenience</h3>
+    <p>As much as possible, the authorization model should be familiar to enterprises looking to adopt Grafbase. It should be documentable, and the path to customization should be clear and accessible.</p>
+    <h3>2.4. Expressive policies</h3>
+    <p>We want to enable fine-grained authorization decisions based on ownership of resources, team memberships, roles and other attributes. If the design does not accommodate this requirement, we will need to tack on more configurability to the solution later as a workaround — we should have enterprise use cases in mind from day one.</p>
+    <h3>2.5. Customizability</h3>
+    <p>Different organizations want different access control rules. We should have defaults, but everything must be tweakable to the needs of enterprises adopting Grafbase.</p>
+    <h3>2.6. Suitability to both the hosted and self hosted Enterprise Platform</h3>
+    <p>Self-hosting is top of mind, but the new solution should also work for the multi-tenant deployment of the Grafbase Enterprise Platform at grafbase.com.</p>
+    <h3>2.7. Integration</h3>
+    <p>Enterprises have centralized authentication, internal user management and authorization services — we will dive into that in more detail in this document. We should support delegating to these services.</p>
+    <h2>3. Landscape</h2>
+    <h3>3.1. Terminology</h3>
+    <ul>
+      <li>In an access control decision, a <strong>principal</strong> is the subject of the decision. The principal is who or what wants to perform an action on a resource. Sometimes, a distinction is made between principal and <strong>subject</strong>, where the subject is a representation of the principal. For example, if the principal is a user, the subject could be that user's user ID in the system.</li>
+    </ul>
+    <blockquote cite="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-principals#a-href-idw2k3tr-princ-whatawhat-are-security-principals">A security principal is any entity that can be authenticated by the operating system, such as a user account, a computer account, or the security groups for these accounts.</blockquote>
+    <p>— <a href="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-principals#a-href-idw2k3tr-princ-whatawhat-are-security-principals">Microsoft Learn</a></p>
+    <ul>
+      <li>The <strong>action</strong> is the operation that the principal wants to perform on the resource. There are standard actions such as "read", "write", and "delete", but many relevant access control actions do not fit in these standard verbs.</li>
+      <li>A <strong>resource</strong> is either a category of objects ("organization settings", "graphs") or an object ("user", "team", "graph") that is the object of an access control decision.</li>
+      <li>The <strong>context</strong> is the additional information that is required to make an access control decision. This can include the time of day, the location of the user, or the device being used.</li>
+    </ul>
+    <h3>3.2. Models of authorization</h3>
+    <ul>
+      <li>
+        <p><strong>Role-based access control (RBAC)</strong> is the traditional model for authorization. Access is determined by roles. You assign permissions to a role (like editor or viewer), and then you assign users to those roles. A user gets all the permissions associated with their assigned role(s). In pure RBAC, categories of users (roles) have access to specific actions on categories of resources: "admins can edit teams", "users with the engineer role can publish subgraphs". There is no notion of ownership ("I am allowed to see my patients' medical records"), conditional access ("employees can edit this data only during business hours") or sharing ("I can view the documents shared with me by their owners") in pure RBAC.</p>
+        <ul>
+          <li>RBAC usually supports a hierarchical structure, where roles can inherit permissions from other roles. This allows for more flexibility and scalability.</li>
+          <li>RBAC is susceptible to role explosion, as soon as you have too many combinations of permissions to express in a small number of roles.</li>
+          <li>In real world scenarios, RBAC is often extended with some notion of ownership of resources, but often in ad-hoc, application specific ways.</li>
+        </ul>
+      </li>
+      <li>
+        <p><strong>Attribute-based access control (ABAC)</strong> is more dynamic and granular. Access decisions are made by evaluating policies based on attributes (characteristics) of the principal, the resource they are trying to access, and the environment (like time of day or location). For example, a policy might state: "Allow a manager to access only their reports' performance reviews, and only during business hours.". Attributes can include ownership information, such as the user's department or the resource's creator.</p>
+        <ul>
+          <li>In ABAC, roles can be expressed as an attributes of the principal.</li>
+        </ul>
+      </li>
+      <li><strong>Relationship-based access control (ReBAC)</strong> grants access based on a principal's relationship to a resource. It answers the question, "Can this user perform this action on this resource because of how they are connected?" For example, you can edit a Google Doc because you are its owner, or you can see a photo on Instagram because you are a follower of the person who posted it. Relationships are rule based and transitive. This is a very powerful model for applications like Google Drive, where ownership can be shared ("I allowed this external user to view, but not edit, that document"), inherited ("ownership of a directory grants you ownership of its subdirectories"), or at the intersection of multiple rules, for example when a user belongs to a company-wide group that has <code>Viewer</code> access to a folder, but they have also been given a direct link that grants <code>Commenter</code> access to a specific document inside it. The system must resolve both the inherited 'viewer' rule from the folder and the direct 'commenter' rule from the link to determine the user's final permission on that document. ReBAC is also known as the <a href="https://research.google/pubs/zanzibar-googles-consistent-global-authorization-system/">Zanzibar</a> model, from the Google paper that introduced it.</li>
+    </ul>
+    <p>Modern enterprise authorization implementations use elements of all these models, where roles are still a relevant concept, layered in with attribute-based access control and fine-grained permissions for each instance of a resource. Even ostensibly ReBAC focused systems like SpiceDB and OpenFGA bake in a context of attributes (ABAC) when evaluating access decisions. These models complement each other. They can coexist in the same system.</p>
+    <p>Another term that has become common is <strong>Policy-based access control (PBAC)</strong>. In PBAC, a policy decision point evaluates policies to manage what an individual or system can do. These policies are essentially a set of rules and conditions that are centrally managed and can be as simple or as complex as needed. Instead of permissions being hard-coded into applications, PBAC externalizes these decisions, allowing for greater flexibility and easier management of access rights. That most often goes hand in hand with policy as code (see below). While RBAC, ABAC, and ReBAC represent different methodologies for determining access, PBAC can be seen as an overarching approach that often incorporates elements of these other models to enforce its policies.</p>
+    <h3>3.3. Modern enterprise authorization</h3>
+    <h4>3.3.1. Policy as code</h4>
+    <p>Authorization as Code (AaC) is the practice of managing and defining access control policies using code, rather than through manual configurations in a database or an admin UI. These policy files are treated just like application code: they are stored in version control (like Git), tested automatically, and deployed through a CI/CD pipeline. It is a subset of Policy as Code.</p>
+    <p>The auditability, traceability and composability benefits known from the usage of code and VCSs as sources of truth apply here in the same way as in other models like Infrastructure as Code (IaC).</p>
+    <p>In this model, authorization logic is also centralized and decoupled from application code: rules are managed in one central place instead of being scattered across one or more application's codebase.</p>
+    <p>Policies can be automatically tested for errors and vulnerabilities before they go live, dramatically reducing the risk of misconfigurations that could lead to data breaches. This makes the system easier to understand, manage, and update. Collaboration is also simplified:writing policies as readable code allows different stakeholders—from developers to security and product managers—to understand and collaborate on the rules that govern their application.</p>
+    <p>Examples:</p>
+    <ul>
+      <li>IAM configuration with Cloudformation or Terraform</li>
+      <li>Rego policies in Open Policy Agent (OPA)</li>
+      <li>SpiceDB schemas</li>
+    </ul>
+    <h4>3.3.2. Integration with OAuth 2.0 and OpenID Connect</h4>
+    <p>Open, well-supported standards that enable interoperation, in particular <a href="https://oauth.net/2/">OAuth 2.0</a> and <a href="https://openid.net/developers/how-connect-works/">OpenID Connect (OIDC)</a>, are preferred to application-specific authentication and authorization mechanisms.</p>
+    <p>The standard set up in enterprises is a federated authentication with a central identity provider (IdP).</p>
+    <h4>3.3.3. Stateless authorization</h4>
+    <p>Where possible, stateless authorization models, where all the necessary context and permissions are embedded in JWT claims, is preferred. Enterprise IdPs like Okta allow organizations to provision and manage custom scopes and fine-grained authorization data with <a href="https://oauth.net/2/rich-authorization-requests/">Rich Authorization Requests (RAR)</a> directly inside users' JWTs for a given application. That configuration stays inside the IdP instead of inside separate applications with their separate state.</p>
+    <h4>3.3.4. Emerging standard: AuthZEN</h4>
+    <p><a href="https://openid.net/wg/authzen/">AuthZEN</a> is a standardization effort started in 2023 and hosted by the OpenID foundation. AuthZEN wants to be to authorization what OpenID Connect is to user authentication.</p>
+    <p>The actors and their roles are described by the <strong>P*P model</strong>:</p>
+    <ul>
+      <li><strong>Policy Enforcement Point (PEP)</strong>. The protected resource server. That is to say, the service that sits in the critical path of application requests. In our case, the Grafbase API. This role is often played by API Gateways. That issue is orthogonal, but we are exploring fleshing out support for acting as an AuthZEN PEP in Grafbase Gateway.</li>
+      <li><strong>Policy Decision Point (PDP)</strong>. The authorization service. When a PEP receives a request, it sends a query to the PDP. The PDP then makes the access decision by evaluating the request against the policies it receives from the PAP and the data it gathers from the PIP. The PDP can also act as both PAP and PIP, depending on the implementation.</li>
+      <li><strong>Policy Information Point (PIP)</strong>. The PIP provides the PDP with the necessary context and attributes to make a decision. This can include information about the user (like their session validity), the resource, the environment, and other business-related attributes, in addition to the context provided by the PEP.</li>
+      <li><strong>Policy Administration Point (PAP)</strong>. The PAP is responsible for creating, managing, and updating the access control policies that the PDP will use. This allows for centralized control over authorization rules.</li>
+    </ul>
+    <p>In its current state (Implementer's Draft 1), the spec is only about the interaction between PEP and PDP. It defines a standard interface between the two.</p>
+    <blockquote cite="https://openid.net/specs/authorization-api-1_0-01.html#section-1">The Authorization API described in this document enables different providers to offer PDP and PEP capabilities without having to bind themselves to one particular implementation of a PDP or PEP</blockquote>
+    <p>— <a href="https://openid.net/specs/authorization-api-1_0-01.html#section-1">AuthZEN spec</a></p>
+    <p>It defines one endpoint on the PDP that returns access control decisions based on a subject (representation of the principal), action, resource and context. The draft spec itself is short, easy to read and implement.</p>
+    <p>In this RFC, we will also focus on just the PEP and PDP. The PEP will be the Grafbase API. The PDP will be either embedded in the Grafbase API, or an external service, depending on the configuration of a specific Enterprise Platform deployment.</p>
+    <p>While the PDP-PEP separation is seeing increasing adoption in enterprise environments, it is uncommon for access control for entire third-party applications to be delegated to an internal PDP, because of the large amount of special policies to write, and the need to reflect an internal data model that, by definition, is developed by third-parties.</p>
+    <h4>3.3.5. Workload identity</h4>
+    <p>Workload identity is the concept of giving a unique, verifiable identity to an automated process, like a CI/CD pipeline or a microservice, allowing it to authenticate and access resources securely without relying on long-lived, static secrets like API keys. This approach significantly enhances security by moving away from secrets that can be leaked or compromised. Instead of storing a secret, the workflow can prove its identity to another system, such as a cloud provider, or a service like the Grafbase API, and receive a short-lived access token in return. This is often accomplished using <a href="https://openid.net/developers/how-connect-works/">OpenID Connect (OIDC)</a>. In this M2M (machine-to-machine) context, the CI/CD platform acts as an OIDC provider, issuing an identity token that describes the workflow's context (e.g., repository, branch, commit SHA). The resource provider can then be configured to trust this OIDC provider and exchange that identity token for a temporary cloud access token. This is precisely how platforms like GitHub Actions and CircleCI enable passwordless authentication to services like AWS, Azure, and Google Cloud, making pipelines more secure and manageable.</p>
+    <p>These concepts are being generalized in frameworks like <a href="https://spiffe.io/docs/latest/spiffe-about/overview/">SPIFFE (Security and Privacy Identity Framework for Everyone)</a>.</p>
+    <p>See <a href="https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation">this good Microsoft docs page</a> on an example of how to use workload identity with Azure.</p>
+    <h2>4. Proposed solution</h2>
+    <p>Our users' use cases exist on a spectrum:</p>
+    <ul>
+      <li>On one end, users of the managed platform and organizations in the earlier stages of adoption will want a built-in authorization model, without deep integration with their IdP, either because their IdP does not give them the power to grant fine grained entitlements and memberships, or because they prefer having everything in the same UI (our dashboard).</li>
+      <li>On the other end, enterprises who want to rely on their central, powerful identity provider (IdP) for fine-grained entitlements, custom scopes, centralized team memberships. These organizations may also already have implemented an external service for authorization, like <a href="https://www.openpolicyagent.org/">Open Policy Agent (OPA)</a>.</li>
+    </ul>
+    <p>We should accomodate all users between these two extremes.</p>
+    <p>Furthermore, as hinted above, individual organizations' use cases will differ in two other ways:</p>
+    <ol>
+      <li value="1">Organizations will want enforcement of access control to be baked in the Grafbase Enterprise Platform, others will want to rely on their central policy decision point (PDP).</li>
+      <li value="2">
+        <p>Organizations will want to lean more or less on their IdP for membership and ownership relations. Some will want to base authorization decisions on fine-grained permissions embedded in ID tokens by their IdP, with custom scopes and <a href="https://oauth.net/2/rich-authorization-requests/">Rich Authorization Requests (RAR)</a>. Others will want to configure individual users and teams' permissions in the Grafbase Dashboard. This is a spectrum, with one extreme not making use of the data in the Grafbase Database for authorization purposes, and the other, more common extreme having no relevant data except user identity in their users' JWTs.</p>
+        <ul>
+          <li>This point is only about human users. For machine-to-machine use cases, we will have a single way to embed fine-grained entitlements in the access tokens (see below).</li>
+        </ul>
+      </li>
+    </ol>
+    <p>For (1.), the solution is an interface used by the Grafbase Enterprise Platform to request authorization decisions, so the PDP is pluggable, with a default implementation baked into the <code>api</code> image of the Enterprise Platform. This RFC proposes using the <a href="https://openid.net/specs/authorization-api-1_0-01.html#name-access-evaluation-api">AuthZEN Access Evaluation API</a> as that interface.</p>
+    <p>To address (2.), the application will send <strong>both</strong> the relevant claims from the JWT and the relevant data from the Grafbase API Database. The PDP on the other side of the interface is responsible for taking the context it deems relevant into account.</p>
+    <p>To reconcile these differing needs, the rest of the RFC will expose a solution that can be summarized as:</p>
+    <ul>
+      <li>on the <strong>entitlements/context/claims</strong> side, <em>both</em> built-in roles, teams and ownership data, and custom scopes / RARs from the IdP</li>
+      <li>on the <strong>access control</strong> side, a built-in <a href="https://www.cedarpolicy.com">Cedar Policy</a> based decision point (PDP) with the ability to replace with or augment with an arbitrary PDP, with communication to that arbitrary PDP taking place as AuthZEN HTTP requests. What authorizer implementation is used will be a matter of configuration.</li>
+    </ul>
+    <p>We will touch first on the interface between the application layer and the PDP, then on the built-in PDP using <a href="https://www.cedarpolicy.com">Cedar Policy</a>, and finally, on a new access tokens implementation with fine-grained permissions baked in.</p>
+    <h3>4.1. The interface</h3>
+    <h4>4.1.1. API</h4>
+    <p>The interface between the application and authorization layers is modeled after the <a href="https://openid.net/specs/authorization-api-1_0-03.html#name-access-evaluation-api">AuthZEN Access Evaluation API</a>. Just like in AuthZEN, there will be a single decision method and a batch method. In the Grafbase API, it will be modelled as a Rust trait. In pseudocode:</p>
+    <pre>type Properties = serde_json::Map;<br><br>struct Subject {<br>    id: String<br>    r#type: String,<br>    properties: Option&lt;Properties>,<br>}<br><br>struct Action {<br>    name: String,<br>    properties: Option&lt;Properties>,<br>}<br><br>struct Resource {<br>    id: String,<br>    r#type: String,<br>    properties: Option&lt;Properties>,<br>}<br><br>struct Request {<br>    subject: Subject,<br>    action: Action,<br>    resource: Resource,<br>    context: Option&lt;serde_json::Map>,<br>}<br><br>struct Decision {<br>    decision: bool,<br>    reason: Option&lt;String>,<br>}<br><br>pub(crate) trait Authorizer {<br>    async fn authorize(&amp;self, request: &amp;Request) -> Result&lt;Decision, Error>;<br>    async fn batch_authorize(&amp;self, requests: &amp;[Request]) -> Result&lt;Vec&lt;Decision>, Error>;<br>}</pre>
+    <p>We will want more precise types in <code>Request</code>, to keep track of what data we actually send and keep it consistent.</p>
+    <p>We will have two implementers of these traits:</p>
+    <ul>
+      <li><code>HttpAuthzenAuthorizer</code>, which forwards the requests to an AuthZEN compliant server over HTTP, and returns the decision(s).</li>
+      <li><code>CedarAuthorizer</code>, which is described below.</li>
+      <li><code>HttpAuthzenAndCedarAuthorizer</code>, which will combine the decisions from both <code>HttpAuthzenAuthorizer</code> and <code>CedarAuthorizer</code>.</li>
+    </ul>
+    <p>Which implementer is used is based on configuration, either in a structured way if we introduce a configuration file, or through environment variables, for example <code>GRAFBASE_AUTHZEN_HTTP_PDP_URL</code>.</p>
+    <h4>4.1.2. Schema and entities</h4>
+    <p>The trait above defines the shape in which authorization requests and the decisions in their responses are communicated. For external PDPs to effectively serve as authorizers for the Grafbase Enterprise Platform, they must know what to expect. We must define and document:</p>
+    <ul>
+      <li>The entities that can appear as subjects and resources.</li>
+      <li>The actions and their properties.</li>
+      <li>The shape of the context.</li>
+    </ul>
+    <p>Except for the shape of the context, the <a href="https://docs.cedarpolicy.com/schema/human-readable-schema.html">Cedar schema format</a> is a very readable language for describing this kind of schemas. It has a JSON mapping which would let us generate code, docs and forms in the dashboard directly from the schema, keeping a single source of truth for our authorization logic's data types and actions. We will elaborate more on Cedar below.</p>
+    <p>You can find a work-in-progress schema for the Grafbase Enterprise Platform authorization logic at <a href="https://github.com/grafbase/cedar-policies">grafbase/cedar-policies</a> on GitHub.</p>
+    <h3>4.2. Built-ins</h3>
+    <h4>4.2.1. Built-in data model</h4>
+    <p>At minimum, a PDP must know which resources it controls access to. In our domain, these would be:</p>
+    <ul>
+      <li>Organizations</li>
+      <li>Users</li>
+      <li>Teams</li>
+      <li>Graphs</li>
+      <li>Branches</li>
+      <li>Subgraphs</li>
+      <li>Schema Proposals</li>
+    </ul>
+    <p>All these resources live in the Grafbase API's database. Organizations, users and teams can be just-in-time provisioned to match groups and users in an IdP. We already have that logic for organizations and users, we would only need to add it for teams.</p>
+    <p>We can keep the existing data model for teams, with a tree hierarchy of nested teams.</p>
+    <p>Graphs, branches and subgraphs can be owned by teams.</p>
+    <p>Schema proposals can have multiple authors (users or teams), and multiple reviewers.</p>
+    <p>All the ownership data mentioned in this section must be available as properties on the principal, resources or context when requesting an authorization decision.</p>
+    <p>Different actions on each of these resources are modeled as different actions in the authorization schema.</p>
+    <h4>4.2.2. Roles</h4>
+    <p>In the Grafbase API database schema, organizations have members, which currently can have one of three roles: "owner", "admin" or "member". The only difference between an admin and an owner is that the owner can delete the organization. For maximum flexibility, this RFC proposes:</p>
+    <ul>
+      <li>Removing the "owner" and "member" roles. By default, there are only admins and regular members. Admins have permissions to modify the organization itself and manage teams, while members can work within the organization, create graphs, etc. These roles, combined with ownership of graphs, branches and subgraphs by teams, offers a good balance of flexibility and restrictions on individual members.</li>
+      <li>Allowing admins to define organization-specific roles and assign them to users or teams. These roles will be passed as part of the principal's properties in authorization requests, so they can be taken into account in access control decisions.</li>
+    </ul>
+    <p>A role is a collection of permissions. Permissions are coarse-grained action-resource pairs. An example role, represented as JSON, may look like this:</p>
+    <pre>{<br>  "name": "SubgraphPublisher",<br>  "permissions": [<br>    "can_publish:subgraph",<br>    "can_create:subgraph",<br>    "can_edit_schema_check_settings:branch"<br>  ],<br>}</pre>
+    <p>The purpose of roles is to provide a first level of coarse grained access control. Fine grained access control comes when roles are combined with ownership over resources.</p>
+    <h4>4.2.3. Built-in PDP with Cedar</h4>
+    <p>For easy integration adoption, we need a good out-of-the-box solution for authorization. That solution has to play well with the subject-action-resource-context model, and it has to be embeddable in the Grafbase API deployment.</p>
+    <p>Zanzibar-like (ReBAC) solutions like SpiceDB and OpenFGA are great, but they are not a fit here because they require much deeper integration in the application (syncing relations to a database).</p>
+    <p>PDPs that are deployable as sidecars would be viable: <a href="https://www.cerbos.dev/">Cerbos</a> and <a href="https://www.openpolicyagent.org/">Open Policy Agent (OPA)</a> are the notable options here.</p>
+    <p>Writing our own policy engine is also an option, but it is more work, and it is not our core business domain.</p>
+    <p>There is a solution that is well supported, embeddable in Rust, declarative, fast, well documented, and easy to use: <a href="https://www.cedarpolicy.com">Cedar Policy</a>, a policy and schema language developed by AWS for its <a href="https://www.cedarpolicy.com/en/integrations/introducing-avp">Amazon Verified Permissions</a> product. The whole language and engine are open source — licensed under Apache 2.0 — and available on crates.io in the <a href="https://crates.io/crates/cedar-policy">cedar-policy crate</a>.</p>
+    <p>Cedar's authorization model is simple: every action is forbidden by default. You write policies that allow some actions for some principals on some resources, with context. These policies can look like this:</p>
+    <pre>permit (<br>    principal in Group::"janeFriends",<br>    action in [Action::"view", Action::"comment"],<br>    resource in Album::"janeTrips"<br>);</pre>
+    <p>Or <code>forbid</code> policies, that override <code>permit</code> rules wherever the <code>forbid</code> rules apply. You can add conditional logic with <code>when</code> and <code>unless</code>:</p>
+    <pre>// Only the owner can access any resource tagged "private"<br><br>forbid ( principal, action, resource )<br>when { resource.tags.contains("private") }    // assumes that resource has "tags"<br>unless { resource in principal.account };     // assumes that principal has "account"</pre>
+    <p>If a type error occurs anywhere when evaluating a policy, that policy does not apply.</p>
+    <p>The schema language is also very straightforward. It has only entities, actions, type aliases and namespaces:</p>
+    <pre>entity Album {<br>  owner: User,<br>  flags: {<br>    organizations?: Set&lt;Org>,<br>    locales?: Set&lt;Location>,<br>    tags: Set&lt;String>,<br>  },<br>};<br><br>action "viewPhoto" appliesTo {<br>  principal: User,<br>  resource: Photo,<br>  context: {<br>    "authenticated": Bool,<br>  }<br>};</pre>
+    <p>Policies can be statically validated against a schema using the Cedar CLI, or the crate. They lend themselves to static analysis, and to being stored in a database. Fundamental properties of the Cedar policy language <a href="https://github.com/cedar-policy/cedar-spec">have been verified in Lean</a>. Also see this <a href="https://docs.cedarpolicy.com/other/security.html">summary on the Cedar security model</a>.</p>
+    <p>In a first step, we would author and embed a Cedar schema and policies in the API, and start enforcing access to resources in the GraphQL API based using the Cedar engine behind the trait described in Section 4.1.1.</p>
+    <p>Since the policy language is easy to read and write, and our target audience is technically savvy, we could in the future allow organizations to define their own policies against our schema, and take them into account in the managed offering. In the Enterprise Platform, we could take the policies as a file path. The default policies will be available on GitHub, and customizing them would start with forking that repository.</p>
+    <p>Because the policies have a one to one mapping to JSON, we could build UI elements to customize parts of the policies, or all of them, and store the results in Postgres. The whole static validation logic for policies is in the open source <a href="https://crates.io/crates/cedar-policy">cedar-policy crate</a>, so these policies can be statically validated for type-correctness and applicability.</p>
+    <p>Since policy evaluation is a pure function, these policies are easy to test. We should aim to provide a good test suite with our base policies repository.</p>
+    <p>Audit logs are also an important feature. We should allow for them in the design, but the details are left to a separate RFC.</p>
+    <h3>4.3. Machine to machine</h3>
+    <p>For machine-to-machine communication, the existing implementation has access tokens. They are JWTs. They are long lived by default, can have an expiration time, and can be revoked. Access tokens are minted by the Grafbase API and enforced by the Grafbase API, as well as the Telemetry Sink and Object Storage services.</p>
+    <h4>4.3.1. Access token security</h4>
+    <p>We will keep long lived access tokens for third-party integrations and the Gateway. The Gateway needs long lived access tokens for reliability, so it does not depend on a token refresh endpoint on the API or another authorization server. We will keep the existing system, with only graph scopes, for Gateway access tokens, with scopes baked into the JWT.</p>
+    <p>We will also introduce access tokens with fine-grained permissions stored in Postgres, for access tokens that only need to communicate with the API. The fine-grained permissions will be built in the UI in the form of a (resource type, action) pair, with a wildcard ("*") or specific IDs for the resource. As you can see in <a href="https://github.com/grafbase/cedar-policies">grafbase/cedar-policies</a>, the AccessToken entity has different properties from User, intentionally, to closely map to this way to assign fine-grained permissions.</p>
+    <p>Instead of the current symmetric encryption algorithm (HMAC), we will switch to asymmetric encryption. The algorithm will be Ed25519 (EdDSA), since it is fast and supported by AWS KMS.</p>
+    <h4>4.3.2. Workflow identity</h4>
+    <p>We will implement support for OIDC based workflow identity, with fine grained permissions, which will be defined with the same UI as fine grained permissions on access tokens.</p>
+    <p>Each organization will be able to configure which OIDC providers they trust, and map claims to fine-grained permissions. A full description of the feature is best left to a separate RFC.</p>
+  </body>
+</html>
